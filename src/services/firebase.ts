@@ -12,34 +12,45 @@ import {
   Auth,
 } from 'firebase/auth';
 
-// Firebase configuration sourced from environment variables with fallback
+// Firebase web configuration sourced from environment variables, falling back to the
+// public web app config for project budgetmind-1ccfb (these values are not secrets)
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || '',
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || 'AIzaSyBcXWbpBqmVcUb0e3D3K7qdvCpKNXGLQ28',
   authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || 'budgetmind-1ccfb.firebaseapp.com',
   projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || 'budgetmind-1ccfb',
   storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || 'budgetmind-1ccfb.firebasestorage.app',
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || '',
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || '',
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || '488842195959',
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || '1:488842195959:web:3ab8e2df67e197f5b834f2',
 };
 
 let app: FirebaseApp | null = null;
 let auth: Auth | null = null;
 let googleProvider: GoogleAuthProvider | null = null;
 
+export const isFirebaseConfigured = Boolean(firebaseConfig.apiKey && firebaseConfig.appId);
+
+if (!isFirebaseConfigured) {
+  console.warn('[Firebase] VITE_FIREBASE_API_KEY / VITE_FIREBASE_APP_ID are not set; Google sign-in is disabled.');
+}
+
 try {
-  if (!getApps().length) {
+  if (!isFirebaseConfigured) {
+    // Skip initialization: initializing with an empty API key makes every auth call fail.
+  } else if (!getApps().length) {
     app = initializeApp(firebaseConfig);
   } else {
     app = getApps()[0];
   }
-  auth = getAuth(app);
-  // Guarantee browser persistence across page reloads
-  setPersistence(auth, browserLocalPersistence).catch((err) => {
-    console.warn('[Firebase] Persistence setting notice:', err);
-  });
+  if (app) {
+    auth = getAuth(app);
+    // Guarantee browser persistence across page reloads
+    setPersistence(auth, browserLocalPersistence).catch((err) => {
+      console.warn('[Firebase] Persistence setting notice:', err);
+    });
 
-  googleProvider = new GoogleAuthProvider();
-  googleProvider.setCustomParameters({ prompt: 'select_account' });
+    googleProvider = new GoogleAuthProvider();
+    googleProvider.setCustomParameters({ prompt: 'select_account' });
+  }
 } catch (err) {
   console.warn('[Firebase] Client initialization notice:', err);
 }
@@ -75,6 +86,9 @@ export function mapFirebaseAuthError(error: any): string {
       return 'Google sign-in is not enabled in the Firebase Console. Please enable Google provider under Authentication > Sign-in method.';
     case 'auth/configuration-not-found':
       return 'Firebase Authentication is not activated yet in project "budgetmind-1ccfb". Please open Firebase Console > Authentication and click "Get started", then enable Google under Sign-in method.';
+    case 'auth/invalid-api-key':
+    case 'auth/api-key-not-valid.-please-pass-a-valid-api-key.':
+      return 'Firebase API key is invalid. Please check VITE_FIREBASE_API_KEY in your Netlify environment variables and redeploy.';
     case 'auth/timeout':
       return 'The authentication request timed out. Please try again.';
     default:
@@ -110,7 +124,11 @@ export async function getCurrentIdToken(forceRefresh = false): Promise<string | 
  */
 export async function signInWithGoogle(): Promise<{ idToken: string; user: any }> {
   if (!auth || !googleProvider) {
-    throw new Error('Firebase Authentication is not initialized on this client.');
+    throw new Error(
+      isFirebaseConfigured
+        ? 'Firebase Authentication is not initialized on this client.'
+        : 'Google sign-in is not configured. Set VITE_FIREBASE_API_KEY and VITE_FIREBASE_APP_ID in the Netlify environment variables and redeploy.'
+    );
   }
 
   try {

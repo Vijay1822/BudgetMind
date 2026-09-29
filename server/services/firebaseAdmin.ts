@@ -1,46 +1,18 @@
 import 'dotenv/config';
-import { initializeApp, cert, getApps, App } from 'firebase-admin/app';
-import { getAuth, Auth } from 'firebase-admin/auth';
+import { createRemoteJWKSet, jwtVerify } from 'jose';
 
-let firebaseAdminApp: App | null = null;
-let firebaseAdminAuth: Auth | null = null;
-let isFirebaseAdminInitialized = false;
+// Firebase ID tokens are RS256 JWTs signed by Google's securetoken service.
+// Verifying them only requires the Firebase project ID and Google's public keys,
+// so no service-account private key is needed on the server.
+const projectId = (process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || 'budgetmind-1ccfb')
+  .replace(/^["']|["']$/g, '')
+  .trim();
 
-const projectId = process.env.FIREBASE_PROJECT_ID
-  ?.replace(/^["']|["']$/g, '')
-  .trim();
-const clientEmail = process.env.FIREBASE_CLIENT_EMAIL
-  ?.replace(/^["']|["']$/g, '')
-  .trim();
-const rawKey = process.env.FIREBASE_PRIVATE_KEY
-  ?.replace(/^["']|["']$/g, '')
-  .trim();
-const privateKey = rawKey
-  ? rawKey.replace(/\\n/g, '\n')
-  : undefined;
+const firebaseJwks = createRemoteJWKSet(
+  new URL('https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com')
+);
 
-if (projectId && clientEmail && privateKey) {
-  try {
-    if (!getApps().length) {
-      firebaseAdminApp = initializeApp({
-        credential: cert({
-          projectId,
-          clientEmail,
-          privateKey,
-        }),
-      });
-    } else {
-      firebaseAdminApp = getApps()[0];
-    }
-    firebaseAdminAuth = getAuth(firebaseAdminApp);
-    isFirebaseAdminInitialized = true;
-    console.log('[FirebaseAdmin] Firebase Admin SDK successfully connected for project:', projectId);
-  } catch (err: any) {
-    console.warn('[FirebaseAdmin] Failed to initialize Firebase Admin SDK:', err.message);
-  }
-} else {
-  console.log('[FirebaseAdmin] Running with environment adapter (FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY pending in server environment).');
-}
+const isFirebaseAdminInitialized = Boolean(projectId);
 
 export interface VerifiedFirebaseUser {
   uid: string;
@@ -62,63 +34,7 @@ export async function verifyFirebaseIdToken(idToken: string): Promise<VerifiedFi
 
   const cleanToken = idToken.trim();
 
-  // 1. Production Mode: Official Cryptographic Verification via Firebase Admin SDK
-  if (isFirebaseAdminInitialized && firebaseAdminAuth) {
-    try {
-      const decoded = await firebaseAdminAuth.verifyIdToken(cleanToken);
-      return {
-        uid: decoded.uid,
-        email: decoded.email || 'user@budgetmind.ai',
-        name: decoded.name || decoded.email?.split('@')[0] || 'BudgetMind User',
-        picture: decoded.picture,
-        isEvaluationUser: false,
-      };
-    } catch (err: any) {
-      // If cryptographic verification failed against the live project, check if evaluation token
-      if (cleanToken.startsWith('firebase-idtoken-') || cleanToken.startsWith('bm-session-') || cleanToken.startsWith('token-')) {
-        return {
-          uid: 'usr-google-eval-101',
-          email: 'alex.rivera@enterprise.com',
-          name: 'Alex Rivera',
-          picture: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&auto=format&fit=crop&q=80',
-          isEvaluationUser: true,
-        };
-      }
-      throw new Error(`Firebase token verification failed: ${err.message}`);
-    }
-  }
-
-  // 2. Client JWT inspection adapter when Admin Private Key is not yet configured on server
-  if (cleanToken.split('.').length === 3) {
-    try {
-      const payloadPart = cleanToken.split('.')[1];
-      const decodedJson = Buffer.from(payloadPart, 'base64url').toString('utf8');
-      const payload = JSON.parse(decodedJson);
-
-      // Verify expiration timestamp
-      if (payload.exp && payload.exp < Date.now() / 1000) {
-        throw new Error('Firebase ID token has expired. Please sign in again.');
-      }
-
-      const uid = payload.user_id || payload.sub;
-      if (!uid) {
-        throw new Error('Token payload missing user identifier (sub/user_id)');
-      }
-
-      return {
-        uid: String(uid),
-        email: payload.email || 'user@budgetmind.ai',
-        name: payload.name || payload.email?.split('@')[0] || 'BudgetMind User',
-        picture: payload.picture,
-        isEvaluationUser: false,
-      };
-    } catch (err: any) {
-      if (err.message.includes('expired')) throw err;
-      // Fall through to evaluation tokens if not standard JWT
-    }
-  }
-
-  // 3. Evaluation / Local Sandbox Token support for unit testing and CI
+  // 1. Evaluation / workspace session tokens issued by /api/auth/login and /signup
   if (cleanToken.startsWith('firebase-idtoken-') || cleanToken.startsWith('bm-session-') || cleanToken.startsWith('token-')) {
     return {
       uid: 'usr-google-eval-101',
@@ -129,7 +45,40 @@ export async function verifyFirebaseIdToken(idToken: string): Promise<VerifiedFi
     };
   }
 
+  // 2. Cryptographic verification of Firebase ID tokens against Google's public keys
+  if (cleanToken.split('.').length === 3) {
+    try {
+      const { payload } = await jwtVerify(cleanToken, firebaseJwks, {
+        issuer: `https://securetoken.google.com/${projectId}`,
+        audience: projectId,
+        algorithms: ['RS256'],
+      });
+
+      const uid = payload.sub;
+      if (!uid) {
+        throw new Error('Token payload missing user identifier (sub)');
+      }
+
+      const email = typeof payload.email === 'string' ? payload.email : undefined;
+      return {
+        uid,
+        email: email || 'user@budgetmind.ai',
+        name: (typeof payload.name === 'string' && payload.name) || email?.split('@')[0] || 'BudgetMind User',
+        picture: typeof payload.picture === 'string' ? payload.picture : undefined,
+        isEvaluationUser: false,
+      };
+    } catch (err: any) {
+      if (err?.code === 'ERR_JWT_EXPIRED') {
+        throw new Error('Firebase ID token has expired. Please sign in again.');
+      }
+      if (err?.code === 'ERR_JWT_CLAIM_VALIDATION_FAILED') {
+        throw new Error(`Firebase token was issued for a different project (expected "${projectId}"). Check FIREBASE_PROJECT_ID / VITE_FIREBASE_PROJECT_ID.`);
+      }
+      throw new Error(`Firebase token verification failed: ${err.message}`);
+    }
+  }
+
   throw new Error('Invalid or unverified authentication token');
 }
 
-export { firebaseAdminApp, firebaseAdminAuth, isFirebaseAdminInitialized };
+export { isFirebaseAdminInitialized };

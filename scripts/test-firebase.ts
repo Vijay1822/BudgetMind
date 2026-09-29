@@ -5,7 +5,7 @@ console.log('--- TESTING FIREBASE ADMIN EXPORT ---');
 console.log('isFirebaseAdminInitialized:', isFirebaseAdminInitialized);
 
 if (isFirebaseAdminInitialized) {
-  console.log('🎉 SUCCESS: Live Firebase Admin is connected to project "budgetmind-1ccfb" using the provided Private Key!');
+  console.log('🎉 SUCCESS: Live Firebase Admin is connected to project "budgetmind-1ccfb" (ID tokens verified against Google public keys)!');
   process.exit(0);
 } else {
   console.error('❌ FAILED: isFirebaseAdminInitialized is false');

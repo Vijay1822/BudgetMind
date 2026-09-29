@@ -167,7 +167,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         body: JSON.stringify({ idToken }),
       });
 
-      const data = await res.json();
+      const data = await res.json().catch(() => null);
+      if (!data) {
+        return { success: false, error: `Authentication server is unreachable (HTTP ${res.status}). Please try again shortly.` };
+      }
       if (data.success && data.data) {
         setUser(data.data.user);
         const resolvedToken = data.data.token || idToken;
@@ -179,7 +182,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
       return { success: false, error: data.error || 'Backend verification failed.' };
     } catch (err: any) {
-      const friendlyMessage = mapFirebaseAuthError(err);
+      // signInWithGoogle already maps Firebase errors to friendly messages
+      const friendlyMessage = err?.message || mapFirebaseAuthError(err);
       return { success: false, error: friendlyMessage };
     } finally {
       setIsLoading(false);
